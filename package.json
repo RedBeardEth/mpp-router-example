@@ -1,0 +1,40 @@
+{
+  "name": "mpp-router-example",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "demo": "vite --host 127.0.0.1 --mode demo",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "test": "vitest run",
+    "test:browser": "playwright test",
+    "storybook": "storybook dev -p 6006 --host 127.0.0.1 --no-open",
+    "build:storybook": "storybook build --quiet",
+    "format": "prettier --write .",
+    "check": "prettier --check . && tsc --noEmit && vitest run && vite build"
+  },
+  "dependencies": {
+    "mppx": "0.9.2",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "viem": "2.55.13"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.61.1",
+    "@storybook/react-vite": "10.6.0",
+    "@types/node": "24.13.3",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.7",
+    "@vitejs/plugin-react": "6.1.2",
+    "prettier": "3.8.1",
+    "storybook": "10.6.0",
+    "typescript": "5.9.3",
+    "vite": "8.2.2",
+    "vitest": "4.1.11"
+  }
+}

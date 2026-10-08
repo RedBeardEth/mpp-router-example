@@ -1,0 +1,11 @@
+node_modules/
+dist/
+storybook-static/
+playwright-report/
+test-results/
+.env*
+!.env.example
+.DS_Store
+*.local
+
+*.log
