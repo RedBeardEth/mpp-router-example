@@ -19,6 +19,8 @@
     "check": "prettier --check . && tsc --noEmit && vitest run && vite build"
   },
   "dependencies": {
+    "@x402/core": "2.25.0",
+    "@x402/evm": "2.25.0",
     "mppx": "0.9.2",
     "react": "19.2.8",
     "react-dom": "19.2.8",

@@ -20,7 +20,7 @@ export default defineConfig(({ mode }) => {
       "ROUTER_ORIGIN must be an HTTPS origin or loopback HTTP origin.",
     );
   const proxy = {
-    "^/router/(v1/models|providers/openai/v1/responses|v1/purchases/[A-Za-z0-9:._%~-]+(/receipt)?)$":
+    "^/router/(v1/models|providers/openai/v1/responses|providers/anthropic/v1/messages|v1/purchases/[A-Za-z0-9:._%~-]+(/receipt)?)$":
       {
         target: origin,
         changeOrigin: true,
@@ -36,6 +36,7 @@ export default defineConfig(({ mode }) => {
               "content-type",
               "content-length",
               "authorization",
+              "payment-signature",
               "x-quote-binding",
               "x-status-token",
             ]);

@@ -8,7 +8,7 @@ const args: PlaygroundProps = {
     maxAmount: "0.10",
   },
   demo: true,
-  models: [{ id: "gpt-5-mini" }],
+  models: [{ id: "gpt-5-mini", operation: "responses" }],
   model: "gpt-5-mini",
   prompt: "Explain machine payments in three short sentences.",
   phase: "idle",
@@ -64,6 +64,7 @@ export const Answer = {
       spent: "5000",
       transaction: "0x" + "a".repeat(64),
       channel: "0x" + "b".repeat(64),
+      explorer: "https://explore.moderato.tempo.xyz/tx/0x" + "a".repeat(64),
     },
   },
 };

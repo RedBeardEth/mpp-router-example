@@ -1,5 +1,5 @@
 import { isAddress, type Address, type EIP1193Provider } from "viem";
-import { ensure, NETWORKS, record, type Config } from "./router";
+import { ensure, NETWORKS, record, type Chain, type Config } from "./router";
 export type BrowserWallet = {
   id: string;
   name: string;
@@ -32,6 +32,7 @@ export function discoverWallets(onWallet: (wallet: BrowserWallet) => void) {
 export async function connectWallet(
   wallet: BrowserWallet,
   config: Config,
+  network: Chain = NETWORKS[config.network],
 ): Promise<ConnectedWallet> {
   const addresses = await wallet.provider.request({
     method: "eth_requestAccounts",
@@ -40,7 +41,6 @@ export async function connectWallet(
     addresses[0] && isAddress(addresses[0]),
     "No wallet account selected.",
   );
-  const network = NETWORKS[config.network];
   const chainId = `0x${network.id.toString(16)}`;
   try {
     await wallet.provider.request({
@@ -58,7 +58,7 @@ export async function connectWallet(
         {
           chainId,
           chainName: network.label,
-          nativeCurrency: { name: "USD", symbol: "USD", decimals: 18 },
+          nativeCurrency: network.native,
           rpcUrls: [network.rpc],
           blockExplorerUrls: [network.explorer],
         },
@@ -70,17 +70,21 @@ export async function connectWallet(
     });
   }
   const connected = { ...wallet, address: addresses[0] };
-  await assertWallet(connected, config);
+  await assertWallet(connected, config, network.id);
   return connected;
 }
-export async function assertWallet(wallet: ConnectedWallet, config: Config) {
+export async function assertWallet(
+  wallet: ConnectedWallet,
+  config: Config,
+  chainId: number = NETWORKS[config.network].id,
+) {
   const [accounts, chain] = await Promise.all([
     wallet.provider.request({ method: "eth_accounts" }),
     wallet.provider.request({ method: "eth_chainId" }),
   ]);
   ensure(
     accounts[0]?.toLowerCase() === wallet.address.toLowerCase() &&
-      Number(chain) === NETWORKS[config.network].id,
+      Number(chain) === chainId,
     "Wallet account or network changed. Reconnect before requesting a new quote.",
   );
 }

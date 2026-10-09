@@ -70,6 +70,7 @@ export function fixtureQuote(body: string, config = DEMO_CONFIG) {
   };
 }
 export function demoCredential(quote: Quote) {
+  if (quote.rail !== "mpp") throw new Error("Demo mode uses MPP only.");
   return Credential.serialize({
     challenge: quote.challenge,
     source: `did:pkh:eip155:42431:${DEMO_WALLET}`,

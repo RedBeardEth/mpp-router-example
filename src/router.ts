@@ -1,8 +1,31 @@
 import { Challenge, Credential, Receipt } from "mppx";
+import {
+  decodePaymentRequiredHeader,
+  decodePaymentResponseHeader,
+  decodePaymentSignatureHeader,
+} from "@x402/core/http";
+import type { PaymentRequired, PaymentRequirements } from "@x402/core/types";
 import { formatUnits, isAddress, parseUnits, type Address } from "viem";
 
 export const ESCROW = "0x4d50500000000000000000000000000000000000" as const;
-export const ROUTE = "/providers/openai/v1/responses";
+/** Paid routes by qualified operation. The model catalog decides which applies. */
+export const OPERATIONS = {
+  responses: "/providers/openai/v1/responses",
+  messages: "/providers/anthropic/v1/messages",
+} as const;
+export type Operation = keyof typeof OPERATIONS;
+export const ROUTE = OPERATIONS.responses;
+/** x402 exact uses a standard typed-data signature; MPP sessions sign a Tempo transaction. */
+export type Rail = "x402" | "mpp";
+export type Chain = {
+  id: number;
+  label: string;
+  asset: string;
+  token: string;
+  rpc: string;
+  explorer: string;
+  native: { name: string; symbol: string; decimals: number };
+};
 export const NETWORKS = {
   testnet: {
     id: 42431,
@@ -11,6 +34,7 @@ export const NETWORKS = {
     token: "0x20c0000000000000000000000000000000000000",
     rpc: "https://rpc.moderato.tempo.xyz",
     explorer: "https://explore.moderato.tempo.xyz",
+    native: { name: "USD", symbol: "USD", decimals: 18 },
   },
   mainnet: {
     id: 4217,
@@ -19,28 +43,61 @@ export const NETWORKS = {
     token: "0x20c000000000000000000000b9537d11c60e8b50",
     rpc: "https://rpc.tempo.xyz",
     explorer: "https://explore.tempo.xyz",
+    native: { name: "USD", symbol: "USD", decimals: 18 },
   },
-} as const;
+} as const satisfies Record<string, Chain>;
+export const BASE = {
+  testnet: {
+    id: 84532,
+    label: "Base Sepolia",
+    asset: "USDC",
+    token: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+    rpc: "https://sepolia.base.org",
+    explorer: "https://sepolia.basescan.org",
+    native: { name: "Ether", symbol: "ETH", decimals: 18 },
+  },
+  mainnet: {
+    id: 8453,
+    label: "Base",
+    asset: "USDC",
+    token: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    rpc: "https://mainnet.base.org",
+    explorer: "https://basescan.org",
+    native: { name: "Ether", symbol: "ETH", decimals: 18 },
+  },
+} as const satisfies Record<string, Chain>;
+export const chainFor = (rail: Rail, network: Config["network"]): Chain =>
+  rail === "x402" ? BASE[network] : NETWORKS[network];
 export type Config = {
   origin: string;
   recipient: string;
   network: keyof typeof NETWORKS;
   maxAmount: string;
 };
-export type Model = { id: string };
-export type Quote = {
+export type Model = { id: string; operation: Operation };
+type QuoteBase = {
   purchase: string;
   binding: string;
   token: string;
   body: string;
-  challenge: ReturnType<typeof Challenge.deserialize>;
-  header: string;
+  operation: Operation;
   amount: string;
   recipient: Address;
   issued: number;
   expires: number;
   model: string;
 };
+export type MppQuote = QuoteBase & {
+  rail: "mpp";
+  challenge: ReturnType<typeof Challenge.deserialize>;
+  header: string;
+};
+export type X402Quote = QuoteBase & {
+  rail: "x402";
+  required: PaymentRequired;
+  offer: PaymentRequirements;
+};
+export type Quote = MppQuote | X402Quote;
 export type Checkpoint = {
   version: 1;
   origin: string;
@@ -55,7 +112,8 @@ export type Result = {
   raw: unknown;
   spent: string;
   transaction: string;
-  channel: string;
+  explorer: string;
+  channel?: string;
   usage?: { input: number; output: number };
 };
 export type Recovery = {
@@ -83,13 +141,22 @@ export function atomic(value: unknown): string {
   ensure(BigInt(value) < 2n ** 96n, "Payment amount is out of range.");
   return value;
 }
-function sameAddress(a: unknown, b: string) {
+export function sameAddress(a: unknown, b: string) {
   return (
     typeof a === "string" &&
     isAddress(a, { strict: false }) &&
     a.toLowerCase() === b.toLowerCase()
   );
 }
+/** Key-order independent JSON, for comparing an offer with its signed copy. */
+const canonical = (value: unknown): string =>
+  JSON.stringify(value, (_, v) =>
+    v && typeof v === "object" && !Array.isArray(v)
+      ? Object.fromEntries(
+          Object.entries(v).sort(([a], [b]) => (a < b ? -1 : 1)),
+        )
+      : v,
+  );
 export function validateConfig(config: Config) {
   const url = new URL(config.origin);
   ensure(
@@ -102,16 +169,78 @@ export function validateConfig(config: Config) {
         ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)),
     "Use HTTPS or a local router.",
   );
-  ensure(config.network in NETWORKS, "Select a supported Tempo network.");
+  ensure(config.network in NETWORKS, "Select a supported network.");
   ensure(
     isAddress(config.recipient, { strict: false }) &&
       !/^0x0{40}$/i.test(config.recipient),
-    "Set ROUTER_RECIPIENT in .env.local to the router’s verified Tempo recipient.",
+    "Set ROUTER_RECIPIENT in .env.local to the router’s verified payment recipient.",
   );
   ensure(
     /^\d+(\.\d{1,6})?$/.test(config.maxAmount) &&
       parseUnits(config.maxAmount, 6) > 0n,
     "The spending limit must be a positive token amount with at most six decimals.",
+  );
+}
+/** Checks shared by every payment rail: identity, privacy and execution terms. */
+function readTerms(
+  response: Response,
+  value: unknown,
+  body: string,
+  config: Config,
+  operation: Operation,
+) {
+  validateConfig(config);
+  ensure(
+    response.status === 402,
+    `Expected a payment quote; router returned HTTP ${response.status}.`,
+  );
+  const data = record(value);
+  ensure(
+    typeof data.purchase_id === "string" &&
+      /^[\w:.-]{1,128}$/.test(data.purchase_id),
+    "Invalid purchase identity.",
+  );
+  const binding = response.headers.get("x-quote-binding"),
+    token = response.headers.get("x-status-token");
+  ensure(
+    binding &&
+      /^0x[\da-f]{64}$/.test(binding) &&
+      data.quote_binding === binding,
+    "Missing or mismatched quote binding.",
+  );
+  ensure(
+    token && /^0x[\da-f]{64}$/.test(token),
+    "Missing private status token.",
+  );
+  const privacy = record(data.privacy);
+  ensure(
+    privacy.revision === "anonymous-volatile-v1" &&
+      privacy.mode === "anonymous" &&
+      privacy.router_content_retention === "none" &&
+      privacy.result_replay_available === false &&
+      privacy.delivery === "live_response_only",
+    "The router did not offer Anonymous live-only delivery.",
+  );
+  const model = record(JSON.parse(body)).model;
+  ensure(
+    data.execution_profile?.model === model &&
+      data.qualified_profile?.model === model &&
+      data.qualified_profile?.operation === operation &&
+      data.qualified_profile?.privacy_revision === privacy.revision,
+    "Missing matching qualification for this model and route.",
+  );
+  return {
+    purchase: data.purchase_id as string,
+    binding,
+    token,
+    model: model as string,
+    ceiling: data.execution_profile?.quote_ceiling as unknown,
+  };
+}
+function withinLimit(amount: string, config: Config) {
+  ensure(
+    BigInt(amount) > 0n && BigInt(amount) <= parseUnits(config.maxAmount, 6),
+    "The quote exceeds your spending limit.",
   );
 }
 export function readQuote(
@@ -120,13 +249,9 @@ export function readQuote(
   body: string,
   config: Config,
   now = Date.now(),
-): Quote {
-  validateConfig(config);
-  ensure(
-    response.status === 402,
-    `Expected a payment quote; router returned HTTP ${response.status}.`,
-  );
-  const data = record(value),
+  operation: Operation = "responses",
+): MppQuote {
+  const terms = readTerms(response, value, body, config, operation),
     network = NETWORKS[config.network];
   const header = response.headers.get("www-authenticate");
   ensure(
@@ -170,13 +295,14 @@ export function readQuote(
     "This example opens one fresh channel per purchase.",
   );
   const amount = atomic(offer.amount);
-  ensure(
-    BigInt(amount) > 0n && BigInt(amount) <= parseUnits(config.maxAmount, 6),
-    "The quote exceeds your spending limit.",
-  );
+  withinLimit(amount, config);
   ensure(
     offer.suggestedDeposit === amount,
     "The suggested deposit differs from the quote ceiling.",
+  );
+  ensure(
+    terms.ceiling === amount,
+    "Execution terms do not match the request and ceiling.",
   );
   ensure(typeof challenge.expires === "string", "The quote has no expiry.");
   const expires = Date.parse(challenge.expires);
@@ -192,68 +318,119 @@ export function readQuote(
     JSON.parse(atob(challenge.opaque.replace(/-/g, "+").replace(/_/g, "/"))),
   );
   ensure(
-    opaque.resource === config.origin + ROUTE &&
-      opaque.purchase === data.purchase_id,
+    opaque.resource === config.origin + OPERATIONS[operation] &&
+      opaque.purchase === terms.purchase,
     "The quote belongs to another resource or purchase.",
   );
-  ensure(
-    typeof data.purchase_id === "string" &&
-      /^[\w:.-]{1,128}$/.test(data.purchase_id),
-    "Invalid purchase identity.",
-  );
-  const binding = response.headers.get("x-quote-binding"),
-    token = response.headers.get("x-status-token");
-  ensure(
-    binding &&
-      /^0x[\da-f]{64}$/.test(binding) &&
-      data.quote_binding === binding,
-    "Missing or mismatched quote binding.",
-  );
-  ensure(
-    token && /^0x[\da-f]{64}$/.test(token),
-    "Missing private status token.",
-  );
-  const privacy = record(data.privacy);
-  ensure(
-    privacy.revision === "anonymous-volatile-v1" &&
-      privacy.mode === "anonymous" &&
-      privacy.router_content_retention === "none" &&
-      privacy.result_replay_available === false &&
-      privacy.delivery === "live_response_only",
-    "The router did not offer Anonymous live-only delivery.",
-  );
-  const model = record(JSON.parse(body)).model;
-  ensure(
-    data.execution_profile?.quote_ceiling === amount &&
-      data.execution_profile?.model === model,
-    "Execution terms do not match the request and ceiling.",
-  );
-  ensure(
-    data.qualified_profile?.model === model &&
-      data.qualified_profile?.operation === "responses" &&
-      data.qualified_profile?.privacy_revision === privacy.revision,
-    "Missing matching Responses qualification.",
-  );
   return {
-    purchase: data.purchase_id,
-    binding,
-    token,
+    rail: "mpp",
+    purchase: terms.purchase,
+    binding: terms.binding,
+    token: terms.token,
     body,
+    operation,
     challenge,
     header: Challenge.serialize(challenge),
     amount,
     recipient: offer.recipient,
     issued: now,
     expires,
-    model,
+    model: terms.model,
+  };
+}
+/** Selects the single Base x402 `exact` (EIP-3009 USDC) offer and checks it. */
+export function readX402Quote(
+  response: Response,
+  value: unknown,
+  body: string,
+  config: Config,
+  now = Date.now(),
+  operation: Operation = "responses",
+): X402Quote {
+  const terms = readTerms(response, value, body, config, operation),
+    chain = BASE[config.network];
+  const header = response.headers.get("payment-required");
+  ensure(header, "No x402 offer. The router did not send PAYMENT-REQUIRED.");
+  let required: PaymentRequired;
+  try {
+    required = decodePaymentRequiredHeader(header);
+  } catch {
+    throw new Error("The router sent an unreadable x402 offer.");
+  }
+  ensure(required.x402Version === 2, "Unsupported x402 version.");
+  ensure(
+    required.resource?.url === config.origin + OPERATIONS[operation],
+    "The quote belongs to another resource.",
+  );
+  const offers = required.accepts.filter(
+    (o) => o.scheme === "exact" && o.network === `eip155:${chain.id}`,
+  );
+  ensure(offers.length === 1, `Expected exactly one ${chain.label} offer.`);
+  const offer = offers[0],
+    extra = record(offer.extra);
+  ensure(
+    sameAddress(offer.asset, chain.token),
+    "The quote uses an unexpected token.",
+  );
+  ensure(
+    sameAddress(offer.payTo, config.recipient),
+    "Recipient does not match this app’s configuration.",
+  );
+  ensure(
+    extra.assetTransferMethod === "eip3009" &&
+      extra.name === "USDC" &&
+      extra.version === "2",
+    "This example signs only EIP-3009 USDC transfer authorizations.",
+  );
+  ensure(
+    extra.purchaseId === terms.purchase,
+    "The quote belongs to another purchase.",
+  );
+  const amount = atomic(offer.amount);
+  withinLimit(amount, config);
+  ensure(
+    terms.ceiling === amount,
+    "Execution terms do not match the request and price.",
+  );
+  ensure(
+    Number.isInteger(offer.maxTimeoutSeconds) &&
+      offer.maxTimeoutSeconds > 0 &&
+      offer.maxTimeoutSeconds <= 120,
+    "The quote has an unexpected payment window.",
+  );
+  return {
+    rail: "x402",
+    purchase: terms.purchase,
+    binding: terms.binding,
+    token: terms.token,
+    body,
+    operation,
+    required,
+    offer,
+    amount,
+    recipient: offer.payTo as Address,
+    issued: now,
+    // The signed authorization is valid for maxTimeoutSeconds from signing.
+    expires: now + offer.maxTimeoutSeconds * 1000,
+    model: terms.model,
   };
 }
 
-export function makeBody(model: string, prompt: string) {
+export function makeBody(
+  model: string,
+  prompt: string,
+  operation: Operation = "responses",
+) {
   ensure(
     prompt.trim().length > 0 && prompt.length <= 8000,
     "Enter a prompt of at most 8,000 characters.",
   );
+  if (operation === "messages")
+    return JSON.stringify({
+      model,
+      max_tokens: 1024,
+      messages: [{ role: "user", content: prompt }],
+    });
   return JSON.stringify({
     model,
     input: prompt,
@@ -301,6 +478,30 @@ export async function readJson(
       "The router returned an unreadable response. Check purchase status if submitted.",
     );
   }
+}
+/** Text from a native Responses or Messages body; empty if it is status metadata. */
+function answerText(data: Record<string, any>, operation: Operation) {
+  if (operation === "messages")
+    return data.type === "message" && Array.isArray(data.content)
+      ? data.content
+          .filter((c: any) => c.type === "text" && typeof c.text === "string")
+          .map((c: any) => c.text)
+          .join("\n")
+      : "";
+  return Array.isArray(data.output)
+    ? data.output
+        .flatMap((item: any) =>
+          Array.isArray(item.content)
+            ? item.content
+                .filter(
+                  (c: any) =>
+                    c.type === "output_text" && typeof c.text === "string",
+                )
+                .map((c: any) => c.text)
+            : [],
+        )
+        .join("\n")
+    : "";
 }
 export function checkpoint(
   quote: Quote,
@@ -373,28 +574,35 @@ export class RouterClient {
     );
     const data = record(await readJson(response, 1024 * 1024));
     ensure(Array.isArray(data.data), "Invalid model catalog.");
-    return data.data
-      .filter(
-        (m: any) =>
-          typeof m.id === "string" &&
-          m.qualified_operations?.includes("responses") &&
-          m.privacy?.revision === "anonymous-volatile-v1",
-      )
-      .map((m: any) => ({ id: m.id }));
+    return data.data.flatMap((m: any) => {
+      const operations = Array.isArray(m.qualified_operations)
+        ? m.qualified_operations
+        : [];
+      const operation = (["responses", "messages"] as const).find((o) =>
+        operations.includes(o),
+      );
+      return typeof m.id === "string" &&
+        operation &&
+        m.privacy?.revision === "anonymous-volatile-v1"
+        ? [{ id: m.id, operation }]
+        : [];
+    });
   }
-  async quote(body: string): Promise<Quote> {
+  async quote(
+    body: string,
+    operation: Operation = "responses",
+    rail: Rail = "mpp",
+  ): Promise<Quote> {
     validateConfig(this.config);
-    const response = await this.request(ROUTE, {
+    const response = await this.request(OPERATIONS[operation], {
       method: "POST",
       body,
       headers: { "Content-Type": "application/json" },
     });
-    return readQuote(
-      response,
-      await readJson(response, 1024 * 1024),
-      body,
-      this.config,
-    );
+    const value = await readJson(response, 1024 * 1024);
+    return rail === "x402"
+      ? readX402Quote(response, value, body, this.config, Date.now(), operation)
+      : readQuote(response, value, body, this.config, Date.now(), operation);
   }
   async submit(
     quote: Quote,
@@ -409,27 +617,50 @@ export class RouterClient {
       Date.now() < quote.expires,
       "The quote expired before submission. No paid request was sent.",
     );
-    const credential = Credential.deserialize(authorization),
-      payload = record(credential.payload);
-    ensure(
-      Challenge.serialize(credential.challenge) === quote.header &&
-        payload.action === "open" &&
-        payload.type === "transaction" &&
-        payload.cumulativeAmount === quote.amount &&
-        /^0x[\da-f]{64}$/i.test(payload.channelId) &&
-        /^0x78[\da-f]+$/i.test(payload.transaction),
-      "The wallet returned an incompatible payment credential.",
-    );
+    let channel: string | undefined, payer: string | undefined;
+    if (quote.rail === "mpp") {
+      const credential = Credential.deserialize(authorization),
+        payload = record(credential.payload);
+      ensure(
+        Challenge.serialize(credential.challenge) === quote.header &&
+          payload.action === "open" &&
+          payload.type === "transaction" &&
+          payload.cumulativeAmount === quote.amount &&
+          /^0x[\da-f]{64}$/i.test(payload.channelId) &&
+          /^0x78[\da-f]+$/i.test(payload.transaction),
+        "The wallet returned an incompatible payment credential.",
+      );
+      channel = payload.channelId;
+    } else {
+      let payment;
+      try {
+        payment = decodePaymentSignatureHeader(authorization);
+      } catch {
+        throw new Error("The wallet returned an unreadable x402 payment.");
+      }
+      const auth = record(record(payment.payload).authorization);
+      ensure(
+        payment.x402Version === 2 &&
+          canonical(payment.accepted) === canonical(quote.offer) &&
+          auth.value === quote.amount &&
+          sameAddress(auth.to, quote.offer.payTo) &&
+          isAddress(auth.from, { strict: false }),
+        "The wallet returned an incompatible payment credential.",
+      );
+      payer = auth.from;
+    }
     beforeSend();
     this.submitted.add(quote.purchase); // Set before I/O; ambiguous outcomes never enable another POST.
     const response = await this.request(
-      ROUTE,
+      OPERATIONS[quote.operation],
       {
         method: "POST",
         body: quote.body,
         headers: {
           "Content-Type": "application/json",
-          Authorization: authorization,
+          ...(quote.rail === "mpp"
+            ? { Authorization: authorization }
+            : { "PAYMENT-SIGNATURE": authorization }),
           "X-Quote-Binding": quote.binding,
           "X-Status-Token": quote.token,
         },
@@ -442,49 +673,66 @@ export class RouterClient {
       `Paid request returned HTTP ${response.status}. Check status; do not pay again.`,
     );
     const data = record(raw);
+    const text = answerText(data, quote.operation);
     ensure(
-      Array.isArray(data.output),
+      text,
       "The router returned purchase metadata, not a live answer. Check status.",
     );
-    const text = data.output
-      .flatMap((item: any) =>
-        Array.isArray(item.content)
-          ? item.content
-              .filter(
-                (c: any) =>
-                  c.type === "output_text" && typeof c.text === "string",
-              )
-              .map((c: any) => c.text)
-          : [],
-      )
-      .join("\n");
-    ensure(text, "No text answer was delivered. Check status.");
-    const header = response.headers.get("payment-receipt");
-    ensure(header, "The response has no MPP receipt. Check status.");
-    const receipt = record(Receipt.deserialize(header));
-    ensure(
-      receipt.status === "success" &&
-        receipt.method === "tempo" &&
-        receipt.intent === "session" &&
-        receipt.challengeId === quote.challenge.id &&
-        receipt.channelId?.toLowerCase() === payload.channelId.toLowerCase() &&
-        receipt.acceptedCumulative === quote.amount &&
-        BigInt(atomic(receipt.spent)) <= BigInt(quote.amount) &&
-        /^0x[\da-f]{64}$/i.test(receipt.txHash),
-      "The MPP receipt does not match this purchase. Check status.",
-    );
     const usage = data.usage;
-    return {
+    const result = {
       text,
       raw,
-      spent: receipt.spent,
-      transaction: receipt.txHash,
-      channel: receipt.channelId,
       usage:
         Number.isSafeInteger(usage?.input_tokens) &&
         Number.isSafeInteger(usage?.output_tokens)
           ? { input: usage.input_tokens, output: usage.output_tokens }
           : undefined,
+    };
+    if (quote.rail === "mpp") {
+      const header = response.headers.get("payment-receipt");
+      ensure(header, "The response has no MPP receipt. Check status.");
+      const receipt = record(Receipt.deserialize(header));
+      ensure(
+        receipt.status === "success" &&
+          receipt.method === "tempo" &&
+          receipt.intent === "session" &&
+          receipt.challengeId === quote.challenge.id &&
+          receipt.channelId?.toLowerCase() === channel!.toLowerCase() &&
+          receipt.acceptedCumulative === quote.amount &&
+          BigInt(atomic(receipt.spent)) <= BigInt(quote.amount) &&
+          /^0x[\da-f]{64}$/i.test(receipt.txHash),
+        "The MPP receipt does not match this purchase. Check status.",
+      );
+      return {
+        ...result,
+        spent: receipt.spent,
+        transaction: receipt.txHash,
+        explorer: `${NETWORKS[this.config.network].explorer}/tx/${receipt.txHash}`,
+        channel: receipt.channelId,
+      };
+    }
+    const header = response.headers.get("payment-response");
+    ensure(header, "The response has no x402 receipt. Check status.");
+    let settled;
+    try {
+      settled = decodePaymentResponseHeader(header);
+    } catch {
+      throw new Error("The x402 receipt is unreadable. Check status.");
+    }
+    const spent = atomic(settled.amount ?? quote.amount);
+    ensure(
+      settled.success === true &&
+        settled.network === quote.offer.network &&
+        (settled.payer === undefined || sameAddress(settled.payer, payer!)) &&
+        spent === quote.amount &&
+        /^0x[\da-f]{64}$/i.test(settled.transaction),
+      "The x402 receipt does not match this purchase. Check status.",
+    );
+    return {
+      ...result,
+      spent,
+      transaction: settled.transaction,
+      explorer: `${BASE[this.config.network].explorer}/tx/${settled.transaction}`,
     };
   }
   async recover(saved: Checkpoint): Promise<Recovery> {
@@ -525,7 +773,7 @@ export class RouterClient {
     ensure(
       receipt.purchase_id === saved.purchase &&
         receipt.status === "verified" &&
-        receipt.payment_profile === "tempo-mpp" &&
+        ["tempo-mpp", "base-direct"].includes(receipt.payment_profile) &&
         BigInt(atomic(receipt.charged_atomic)) <= BigInt(saved.amount),
       "The receipt does not match this purchase.",
     );

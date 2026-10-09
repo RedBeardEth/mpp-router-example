@@ -2,7 +2,12 @@
 
 A small React + TypeScript app that connects a browser wallet, requests an inference quote from [402-router](https://github.com/daydreamsai/402-router), approves a Tempo MPP session, and displays the answer and payment receipt. No provider API key is needed in the browser.
 
-The app uses the router’s existing `/providers/openai/v1/responses` endpoint and `anonymous-volatile-v1` contract. It opens one funded session per purchase: the displayed ceiling is a **hold**, successful inference is charged for actual usage under the quote, and the remainder is released. Failed inference is zero charge. A result lost **after** the router commits completion can still be charged.
+The app picks the route from the router’s qualified catalog: OpenAI `/providers/openai/v1/responses` or Anthropic `/providers/anthropic/v1/messages`, both under the `anonymous-volatile-v1` contract. It offers two payment methods:
+
+- **x402 · Base USDC (default).** The router’s `exact` offer on Base (Sepolia on testnet). The wallet signs one EIP-3009 USDC transfer authorization with `eth_signTypedData_v4`, which standard wallets such as MetaMask support. The quoted price is charged in full only when inference succeeds.
+- **MPP · Tempo.** One funded session per purchase: the displayed ceiling is a **hold**, successful inference is charged for actual usage, and the remainder is released. This needs a wallet that can sign Tempo transactions without broadcasting them (see below); MetaMask cannot.
+
+Failed inference is zero charge. A result lost **after** the router commits completion can still be charged.
 
 ![Demo purchase and response; all values are simulated.](docs/preview.png)
 
@@ -25,12 +30,12 @@ cp .env.example .env.local
 npm run dev
 ```
 
-| Setting            | Purpose                                                                                                                           |
-| ------------------ | --------------------------------------------------------------------------------------------------------------------------------- |
-| `ROUTER_ORIGIN`    | Exact API origin, with no path or trailing slash. Default: `http://127.0.0.1:38080`. HTTPS is required except for loopback.       |
-| `ROUTER_RECIPIENT` | Expected Tempo payment recipient, obtained independently from your router operator. Required before a live quote can be accepted. |
-| `TEMPO_NETWORK`    | `testnet` (default) or `mainnet`. Changes the chain and token together.                                                           |
-| `MAX_PAYMENT`      | Maximum per-request deposit, in token units. Default `0.10`; at most six decimal places. This is a client limit, not a price.     |
+| Setting            | Purpose                                                                                                                                                           |
+| ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ROUTER_ORIGIN`    | Exact API origin, with no path or trailing slash. Default: `http://127.0.0.1:38080`. HTTPS is required except for loopback.                                       |
+| `ROUTER_RECIPIENT` | Expected payment recipient (used for both Base and Tempo offers), obtained independently from your router operator. Required before a live quote can be accepted. |
+| `TEMPO_NETWORK`    | `testnet` (default) or `mainnet`. Changes the chain and token together.                                                                                           |
+| `MAX_PAYMENT`      | Maximum per-request deposit, in token units. Default `0.10`; at most six decimal places. This is a client limit, not a price.                                     |
 
 Restart Vite after changing configuration. These values are public; **never put a wallet key, provider key, private RPC credential, or operator secret in this app.**
 
@@ -44,6 +49,8 @@ The router must already have:
 The default request uses up to 1,024 output tokens, no streaming, and `store: false`. `gpt-5-mini` selects minimal reasoning; other discovered models use their default. A model’s quote remains authoritative and may exceed the local spending limit.
 
 ### Wallet compatibility
+
+The x402 method works with any injected EVM wallet that supports `eth_signTypedData_v4` and can switch to Base. The rest of this section applies to the MPP method.
 
 Use an injected EIP-1193 / EIP-6963 browser wallet with a **direct secp256k1 account** that supports all of:
 

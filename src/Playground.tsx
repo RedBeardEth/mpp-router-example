@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import {
   displayAmount,
-  NETWORKS,
+  chainFor,
+  type Rail,
   type Config,
   type Model,
   type Quote,
@@ -46,6 +47,8 @@ export type PlaygroundProps = {
   onReload: () => void;
   onDownload: () => void;
   onDismiss?: () => void;
+  rail?: Rail;
+  onRail?: (value: Rail) => void;
 };
 const short = (value: string, head = 6, tail = 4) =>
   value.length > head + tail + 1
@@ -53,7 +56,11 @@ const short = (value: string, head = 6, tail = 4) =>
     : value;
 const TERMINAL_OK = ["verified", "zero_charge"];
 export function Playground(p: PlaygroundProps) {
-  const network = NETWORKS[p.config.network];
+  const rail = p.rail ?? "mpp",
+    x402 = rail === "x402";
+  const network = chainFor(rail, p.config.network);
+  const operation =
+    p.models.find((m) => m.id === p.model)?.operation ?? "responses";
   const locked = p.phase !== "idle",
     quoted = p.phase === "quoted",
     approvable = quoted || p.phase === "signing",
@@ -70,12 +77,16 @@ export function Playground(p: PlaygroundProps) {
     },
     {
       label: "Approve in your wallet",
-      note: "MPP · funded session",
+      note: x402
+        ? "x402 · USDC transfer authorization"
+        : "MPP · funded session",
       done: ["running", "done", "uncertain"].includes(p.phase),
     },
     {
       label: "Receive your answer",
-      note: "Actual usage · remainder released",
+      note: x402
+        ? "Fixed price · charged only on success"
+        : "Actual usage · remainder released",
       done: !!p.result,
     },
   ];
@@ -139,6 +150,8 @@ export function Playground(p: PlaygroundProps) {
               <>
                 Run <code>npm run dev</code> for live mode
               </>
+            ) : x402 ? (
+              "x402 exact"
             ) : (
               "MPP session v2"
             )}
@@ -171,7 +184,11 @@ export function Playground(p: PlaygroundProps) {
                 <h2 id="request-heading">
                   <span className="index">01</span>Your request
                 </h2>
-                <span className="micro">OPENAI RESPONSES</span>
+                <span className="micro">
+                  {operation === "messages"
+                    ? "ANTHROPIC MESSAGES"
+                    : "OPENAI RESPONSES"}
+                </span>
               </div>
               <div className="form-fields">
                 <label htmlFor="model">
@@ -289,8 +306,9 @@ export function Playground(p: PlaygroundProps) {
                       {p.quote && (
                         <span className="muted">
                           {" "}
-                          of {displayAmount(p.quote.amount)} held · rest
-                          released
+                          {x402
+                            ? "· fixed price"
+                            : `of ${displayAmount(p.quote.amount)} held · rest released`}
                         </span>
                       )}
                     </span>
@@ -302,7 +320,7 @@ export function Playground(p: PlaygroundProps) {
                     )}
                     {!p.demo && (
                       <a
-                        href={`${network.explorer}/tx/${p.result.transaction}`}
+                        href={p.result.explorer}
                         target="_blank"
                         rel="noreferrer"
                       >
@@ -360,6 +378,32 @@ export function Playground(p: PlaygroundProps) {
                 <span className="micro">{network.asset}</span>
               </div>
               <div className="payment-content">
+                {!p.demo && p.onRail && (
+                  <div
+                    className="rail-switch"
+                    role="radiogroup"
+                    aria-label="Payment method"
+                  >
+                    {(
+                      [
+                        ["x402", "x402 · Base USDC", "Any EVM wallet"],
+                        ["mpp", "MPP · Tempo", "Tempo signing wallet"],
+                      ] as const
+                    ).map(([value, label, hint]) => (
+                      <button
+                        key={value}
+                        role="radio"
+                        aria-checked={rail === value}
+                        className={rail === value ? "selected" : ""}
+                        disabled={p.busy || locked}
+                        onClick={() => p.onRail?.(value)}
+                      >
+                        <strong>{label}</strong>
+                        <small>{hint}</small>
+                      </button>
+                    ))}
+                  </div>
+                )}
                 <div className="wallet-block">
                   <span className="field-label">WALLET</span>
                   {p.wallet ? (
@@ -371,8 +415,9 @@ export function Playground(p: PlaygroundProps) {
                   ) : (
                     <>
                       <p>
-                        Connect a Tempo-compatible browser wallet to approve
-                        your payment.
+                        {x402
+                          ? `Connect a browser wallet such as MetaMask. It will switch to ${network.label}.`
+                          : "Connect a Tempo-compatible browser wallet to approve your payment."}
                       </p>
                       {p.walletNames.length > 1 && (
                         <div className="select-wrap">
@@ -402,14 +447,18 @@ export function Playground(p: PlaygroundProps) {
                   )}
                 </div>
                 <div className="amount-block">
-                  <span className="field-label">MAXIMUM HOLD</span>
+                  <span className="field-label">
+                    {x402 ? "PRICE" : "MAXIMUM HOLD"}
+                  </span>
                   <div className={"amount" + (p.quote ? "" : " pending")}>
                     {p.quote ? displayAmount(p.quote.amount) : "—"}
                     <span>{network.asset}</span>
                   </div>
                   <p>
                     {p.quote
-                      ? "Only actual usage is charged. Unused funds are released after settlement."
+                      ? x402
+                        ? "Charged in full only if inference succeeds. Failed inference is not charged."
+                        : "Only actual usage is charged. Unused funds are released after settlement."
                       : `Per-request limit: ${p.config.maxAmount} ${network.asset}. Your quote sets the exact ceiling.`}
                   </p>
                 </div>
@@ -465,7 +514,9 @@ export function Playground(p: PlaygroundProps) {
                 {quoted && !expired && (
                   <p className="caption">
                     {p.wallet
-                      ? "Approval signs a hold up to the displayed ceiling. This action can spend funds."
+                      ? x402
+                        ? "Approval signs a USDC transfer authorization for this price. This action can spend funds."
+                        : "Approval signs a hold up to the displayed ceiling. This action can spend funds."
                       : "Connect a wallet above to approve this quote."}
                   </p>
                 )}
@@ -594,8 +645,8 @@ export function Playground(p: PlaygroundProps) {
             <div>
               <strong>02 / Authorize</strong>
               <p>
-                mppx signs a sponsored session opening and ceiling voucher in
-                your browser wallet.
+                Your wallet signs an x402 USDC transfer authorization, or an MPP
+                session voucher on Tempo. Nothing is broadcast by the browser.
               </p>
             </div>
             <div>

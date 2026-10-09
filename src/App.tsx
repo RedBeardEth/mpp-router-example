@@ -3,6 +3,7 @@ import { Playground, type Phase } from "./Playground";
 import {
   CHECKPOINT_KEY,
   RouterClient,
+  chainFor,
   checkpoint,
   loadCheckpoint,
   makeBody,
@@ -11,6 +12,7 @@ import {
   type Config,
   type Model,
   type Quote,
+  type Rail,
   type Recovery,
   type Result,
 } from "./router";
@@ -31,6 +33,9 @@ export function App({ config, demo }: { config: Config; demo?: Demo }) {
   const [prompt, setPrompt] = useState(
     "Explain machine payments in three short sentences.",
   );
+  // Demo fixtures only simulate MPP; live mode defaults to x402, which
+  // standard browser wallets can sign.
+  const [rail, setRail] = useState<Rail>(demo ? "mpp" : "x402");
   const [wallets, setWallets] = useState<BrowserWallet[]>([]),
     [selectedWallet, setSelectedWallet] = useState("");
   const [wallet, setWallet] = useState<ConnectedWallet>(),
@@ -67,11 +72,15 @@ export function App({ config, demo }: { config: Config; demo?: Demo }) {
     const catalog = await client.models();
     setModels(catalog);
     setModel(
-      catalog.find((m) => m.id === "gpt-5-mini")?.id ?? catalog[0]?.id ?? "",
+      (
+        catalog.find((m) => m.id === "gpt-5-mini") ??
+        catalog.find((m) => m.id.includes("haiku")) ??
+        catalog[0]
+      )?.id ?? "",
     );
     if (!catalog.length)
       throw new Error(
-        "The router has no qualified Responses models. Check router readiness and catalog configuration.",
+        "The router has no qualified Responses or Messages models. Check router readiness and catalog configuration.",
       );
   }
   useEffect(() => {
@@ -148,8 +157,12 @@ export function App({ config, demo }: { config: Config; demo?: Demo }) {
           "No browser wallet detected. Use a secp256k1 wallet supporting Tempo eth_signTransaction and typed-data signing. See the README compatibility notes, or try npm run demo.",
         );
       try {
-        setWallet(await connectWallet(selected, config));
-        void import("./wallet").catch(() => {}); // Warm the signing chunk.
+        setWallet(
+          await connectWallet(selected, config, chainFor(rail, config.network)),
+        );
+        void (rail === "x402" ? import("./x402") : import("./wallet")).catch(
+          () => {},
+        ); // Warm the signing chunk.
       } catch {
         throw new Error(
           "Wallet connection was declined or the wallet could not switch to the configured Tempo network.",
@@ -163,7 +176,13 @@ export function App({ config, demo }: { config: Config; demo?: Demo }) {
       setQuote(undefined);
       setPhase("quoting");
       try {
-        const q = await client.quote(makeBody(model, prompt));
+        const operation =
+          models.find((m) => m.id === model)?.operation ?? "responses";
+        const q = await client.quote(
+          makeBody(model, prompt, operation),
+          operation,
+          rail,
+        );
         setQuote(q);
         setPhase("quoted");
       } catch (e) {
@@ -183,9 +202,15 @@ export function App({ config, demo }: { config: Config; demo?: Demo }) {
         let authorization: string;
         if (demo) authorization = demo.demoCredential(quote);
         else {
-          const { signQuote } = await import("./wallet");
           try {
-            authorization = await signQuote(wallet!, quote, config);
+            authorization =
+              quote.rail === "x402"
+                ? await (
+                    await import("./x402")
+                  ).signX402(wallet!, quote, config)
+                : await (
+                    await import("./wallet")
+                  ).signQuote(wallet!, quote, config);
           } catch (error) {
             // Show the wallet's own reason; the generic text alone hides it.
             const e = error as { shortMessage?: unknown; message?: unknown };
@@ -272,6 +297,13 @@ export function App({ config, demo }: { config: Config; demo?: Demo }) {
       }
       onReload={() => perform(reload)}
       onDismiss={() => setMessage(undefined)}
+      rail={rail}
+      onRail={(next) => {
+        if (lock.current || phase !== "idle" || next === rail) return;
+        setRail(next);
+        // Each rail uses a different chain, so reconnect to switch networks.
+        setWallet(undefined);
+      }}
       onDownload={() =>
         result && download("inference-response.json", result.raw)
       }

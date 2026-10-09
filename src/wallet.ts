@@ -17,7 +17,7 @@ import {
   NETWORKS,
   record,
   type Config,
-  type Quote,
+  type MppQuote,
 } from "./router";
 // Signing pulls in the MPP client and chain definitions, so the app loads this
 // module only when a payment is approved. Discovery stays in ./discovery.
@@ -60,7 +60,7 @@ export function assertDirectCredential(
 }
 export async function signQuote(
   wallet: ConnectedWallet,
-  quote: Quote,
+  quote: MppQuote,
   config: Config,
 ) {
   await assertWallet(wallet, config);
