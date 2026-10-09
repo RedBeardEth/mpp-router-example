@@ -353,7 +353,8 @@ export class RouterClient {
   private submitted = new Set<string>();
   constructor(
     readonly config: Config,
-    private transport: typeof fetch = fetch,
+    // Wrapped so the browser's fetch is never called with the client as `this`.
+    private transport: typeof fetch = (input, init) => fetch(input, init),
   ) {}
   private request(path: string, init: RequestInit = {}, timeout = 20000) {
     return this.transport("/router" + path, {
