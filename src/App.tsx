@@ -186,9 +186,16 @@ export function App({ config, demo }: { config: Config; demo?: Demo }) {
           const { signQuote } = await import("./wallet");
           try {
             authorization = await signQuote(wallet!, quote, config);
-          } catch {
+          } catch (error) {
+            // Show the wallet's own reason; the generic text alone hides it.
+            const e = error as { shortMessage?: unknown; message?: unknown };
+            const reason = String(e?.shortMessage ?? e?.message ?? "").slice(
+              0,
+              240,
+            );
             throw new Error(
-              "Signing was declined or unsupported, the wallet changed, or the quote expired. No paid request was sent. This router requires a direct secp256k1 Tempo wallet; see README.",
+              "Signing was declined or unsupported, the wallet changed, or the quote expired. No paid request was sent. This router requires a direct secp256k1 Tempo wallet; see README." +
+                (reason ? ` Wallet said: ${reason}` : ""),
             );
           }
         }
