@@ -11,6 +11,7 @@
     "demo": "vite --host 127.0.0.1 --mode demo",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --host 127.0.0.1",
+    "start": "node server.mjs",
     "test": "vitest run",
     "test:browser": "playwright test",
     "storybook": "storybook dev -p 6006 --host 127.0.0.1 --no-open",

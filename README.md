@@ -113,7 +113,9 @@ Anonymous means the router shields payment identity from the upstream model prov
 
 The current router code does not provide the browser CORS layer needed for these headers. Vite forwards only the example’s model, Responses, status, and receipt routes to the **fixed configured origin**, strips browser identity/cookie headers, preserves exact body bytes, and adds `Cache-Control: no-store`. It does not follow redirects or calculate prices. Both development and preview use this local proxy. The proxy necessarily sees plaintext content and payment headers in memory.
 
-`npm run build` creates static assets; `npm run preview` serves them locally with the proxy. **Vite preview is not a production server.** Static hosting alone will not provide `/router`. A deployed demo must use a reviewed same-origin proxy with equivalent allowlists, bounded bodies/timeouts, cancellation, no retries, no content logging or caching, and the router’s required privacy qualification—or call a router with explicitly configured CORS. Public production deployment is outside this basic example.
+**Hosting.** [`server.mjs`](server.mjs) is a small dependency-free production server: it serves `dist/` and the same route/header allowlist as the Vite proxy, with a 1 MiB request bound, a 130-second deadline that is cancelled when the browser disconnects, no redirects, retries, caching or content logging, and a strict Content-Security-Policy. The [`Dockerfile`](Dockerfile) builds the app with `ROUTER_ORIGIN`, `ROUTER_RECIPIENT`, `TEMPO_NETWORK` and `MAX_PAYMENT` as build arguments and runs the server on `PORT` (default 8080) with `/healthz`. Pass the same `ROUTER_ORIGIN` at build and run time.
+
+`npm run build` creates static assets; `npm run preview` serves them locally with the proxy. **Vite preview is not a production server;** use `npm start` after a build, or the Dockerfile. Static hosting alone will not provide `/router`.
 
 ## Development and checks
 
