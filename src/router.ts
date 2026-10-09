@@ -37,6 +37,7 @@ export type Quote = {
   header: string;
   amount: string;
   recipient: Address;
+  issued: number;
   expires: number;
   model: string;
 };
@@ -55,6 +56,7 @@ export type Result = {
   spent: string;
   transaction: string;
   channel: string;
+  usage?: { input: number; output: number };
 };
 export type Recovery = {
   inference: string;
@@ -241,6 +243,7 @@ export function readQuote(
     header: Challenge.serialize(challenge),
     amount,
     recipient: offer.recipient,
+    issued: now,
     expires,
     model,
   };
@@ -469,12 +472,18 @@ export class RouterClient {
         /^0x[\da-f]{64}$/i.test(receipt.txHash),
       "The MPP receipt does not match this purchase. Check status.",
     );
+    const usage = data.usage;
     return {
       text,
       raw,
       spent: receipt.spent,
       transaction: receipt.txHash,
       channel: receipt.channelId,
+      usage:
+        Number.isSafeInteger(usage?.input_tokens) &&
+        Number.isSafeInteger(usage?.output_tokens)
+          ? { input: usage.input_tokens, output: usage.output_tokens }
+          : undefined,
     };
   }
   async recover(saved: Checkpoint): Promise<Recovery> {

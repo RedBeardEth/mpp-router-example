@@ -71,4 +71,8 @@ test("expired quotes cannot be approved", async ({ page }) => {
   await expect(
     page.getByRole("button", { name: "Approve & run" }),
   ).toBeDisabled();
+  await page.getByRole("button", { name: "Get a new quote" }).click();
+  await expect(
+    page.getByRole("button", { name: "Approve & run" }),
+  ).toBeEnabled();
 });

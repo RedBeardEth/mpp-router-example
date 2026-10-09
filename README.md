@@ -78,7 +78,7 @@ Browser                     Local Vite proxy                 Router
   GET purchase status / receipt ---------------------------> financial metadata only
 ```
 
-[`src/router.ts`](src/router.ts) owns quote validation, exact request-byte reuse, one paid submission, receipt matching, bounded response reading, and GET-only recovery. [`src/wallet.ts`](src/wallet.ts) contains the actual `mppx@0.9.2` / `viem@2.55.13` signing integration, pinned to the router’s reviewed client versions. [`src/App.tsx`](src/App.tsx) owns state and the browser checkpoint; [`src/Playground.tsx`](src/Playground.tsx) is presentation-only.
+[`src/router.ts`](src/router.ts) owns quote validation, exact request-byte reuse, one paid submission, receipt matching, bounded response reading, and GET-only recovery. [`src/discovery.ts`](src/discovery.ts) finds and connects EIP-6963 wallets. [`src/wallet.ts`](src/wallet.ts), loaded only when a payment is approved, contains the actual `mppx@0.9.2` / `viem@2.55.13` signing integration, pinned to the router’s reviewed client versions. [`src/App.tsx`](src/App.tsx) owns state and the browser checkpoint; [`src/Playground.tsx`](src/Playground.tsx) is presentation-only.
 
 `Mppx.create({ polyfill: false })` and `preparePayment()` are intentional. An automatic payment fetch wrapper could hide a second authorization or paid retry after an uncertain outcome. The example explicitly makes one unpaid request and at most one paid request. No paid POST is retried, redirected, or replayed by recovery.
 

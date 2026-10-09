@@ -17,10 +17,9 @@ import {
 import {
   connectWallet,
   discoverWallets,
-  signQuote,
   type BrowserWallet,
   type ConnectedWallet,
-} from "./wallet";
+} from "./discovery";
 
 type Demo = typeof import("./demo");
 export function App({ config, demo }: { config: Config; demo?: Demo }) {
@@ -106,6 +105,8 @@ export function App({ config, demo }: { config: Config; demo?: Demo }) {
           }),
     [demo],
   );
+  // The countdown only matters while the quote can still be approved.
+  const approvable = phase === "quoted" || phase === "signing";
   useEffect(() => {
     if (!quote) {
       setSeconds(0);
@@ -114,9 +115,10 @@ export function App({ config, demo }: { config: Config; demo?: Demo }) {
     const update = () =>
       setSeconds(Math.max(0, Math.ceil((quote.expires - Date.now()) / 1000)));
     update();
+    if (!approvable) return;
     const timer = setInterval(update, 1000);
     return () => clearInterval(timer);
-  }, [quote]);
+  }, [quote, approvable]);
   useEffect(() => {
     if (!wallet) return;
     const changed = () => {
@@ -147,6 +149,7 @@ export function App({ config, demo }: { config: Config; demo?: Demo }) {
         );
       try {
         setWallet(await connectWallet(selected, config));
+        void import("./wallet").catch(() => {}); // Warm the signing chunk.
       } catch {
         throw new Error(
           "Wallet connection was declined or the wallet could not switch to the configured Tempo network.",
@@ -155,6 +158,9 @@ export function App({ config, demo }: { config: Config; demo?: Demo }) {
     });
   const getQuote = () =>
     perform(async () => {
+      // An expired, unpaid quote can be replaced; anything later cannot.
+      if (phase !== "idle" && !(phase === "quoted" && seconds <= 0)) return;
+      setQuote(undefined);
       setPhase("quoting");
       try {
         const q = await client.quote(makeBody(model, prompt));
@@ -177,6 +183,7 @@ export function App({ config, demo }: { config: Config; demo?: Demo }) {
         let authorization: string;
         if (demo) authorization = demo.demoCredential(quote);
         else {
+          const { signQuote } = await import("./wallet");
           try {
             authorization = await signQuote(wallet!, quote, config);
           } catch {
@@ -257,6 +264,7 @@ export function App({ config, demo }: { config: Config; demo?: Demo }) {
         saved && download("private-purchase-recovery.json", saved)
       }
       onReload={() => perform(reload)}
+      onDismiss={() => setMessage(undefined)}
       onDownload={() =>
         result && download("inference-response.json", result.raw)
       }

@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import {
   displayAmount,
   NETWORKS,
@@ -44,11 +45,23 @@ export type PlaygroundProps = {
   onExport: () => void;
   onReload: () => void;
   onDownload: () => void;
+  onDismiss?: () => void;
 };
+const short = (value: string, head = 6, tail = 4) =>
+  value.length > head + tail + 1
+    ? `${value.slice(0, head)}…${value.slice(-tail)}`
+    : value;
+const TERMINAL_OK = ["verified", "zero_charge"];
 export function Playground(p: PlaygroundProps) {
   const network = NETWORKS[p.config.network];
   const locked = p.phase !== "idle",
-    quoted = p.phase === "quoted";
+    quoted = p.phase === "quoted",
+    approvable = quoted || p.phase === "signing",
+    expired = quoted && p.seconds <= 0;
+  const lifetime = p.quote
+    ? Math.max(1, Math.round((p.quote.expires - p.quote.issued) / 1000))
+    : 1;
+  const remaining = Math.min(1, p.seconds / lifetime);
   const steps = [
     {
       label: "Request a quote",
@@ -58,7 +71,7 @@ export function Playground(p: PlaygroundProps) {
     {
       label: "Approve in your wallet",
       note: "MPP · funded session",
-      done: ["running", "done"].includes(p.phase),
+      done: ["running", "done", "uncertain"].includes(p.phase),
     },
     {
       label: "Receive your answer",
@@ -66,6 +79,18 @@ export function Playground(p: PlaygroundProps) {
       done: !!p.result,
     },
   ];
+  const current = steps.findIndex((step) => !step.done);
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    if (!copied) return;
+    const timer = setTimeout(() => setCopied(false), 1600);
+    return () => clearTimeout(timer);
+  }, [copied]);
+  const copy = (text: string) =>
+    navigator.clipboard
+      ?.writeText(text)
+      .then(() => setCopied(true))
+      .catch(() => {});
   return (
     <div className="shell">
       <header className="topbar">
@@ -77,6 +102,7 @@ export function Playground(p: PlaygroundProps) {
           <span className="wordmark-sub">examples</span>
         </a>
         <a
+          className="topbar-link"
           href="https://github.com/daydreamsai/402-router"
           target="_blank"
           rel="noreferrer"
@@ -101,7 +127,7 @@ export function Playground(p: PlaygroundProps) {
             without a provider API key.
           </p>
         </div>
-        <div className={"mode-bar " + (p.demo ? "demo" : "")}>
+        <div className={"mode-bar " + (p.demo ? "demo" : "live")}>
           <span>
             <span className="status-dot" />
             {p.demo
@@ -109,12 +135,30 @@ export function Playground(p: PlaygroundProps) {
               : `${network.label} · ${network.asset} · live router`}
           </span>
           <span className="mode-detail">
-            {p.demo ? "Run npm run dev for live mode" : "MPP session v2"}
+            {p.demo ? (
+              <>
+                Run <code>npm run dev</code> for live mode
+              </>
+            ) : (
+              "MPP session v2"
+            )}
           </span>
         </div>
         {p.message && (
           <div className="notice" role="alert">
-            {p.message}
+            <span className="notice-icon" aria-hidden="true">
+              !
+            </span>
+            <p>{p.message}</p>
+            {p.onDismiss && (
+              <button
+                className="notice-close"
+                onClick={p.onDismiss}
+                aria-label="Dismiss message"
+              >
+                ×
+              </button>
+            )}
           </div>
         )}
         <div className="workspace">
@@ -133,21 +177,23 @@ export function Playground(p: PlaygroundProps) {
                 <label htmlFor="model">
                   Model <span>From the router’s qualified catalog</span>
                 </label>
-                <select
-                  id="model"
-                  value={p.model}
-                  onChange={(e) => p.onModel(e.target.value)}
-                  disabled={locked || p.models.length === 0}
-                >
-                  <option value="" disabled>
-                    {p.models.length ? "Choose a model" : "No models loaded"}
-                  </option>
-                  {p.models.map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {m.id}
+                <div className="select-wrap">
+                  <select
+                    id="model"
+                    value={p.model}
+                    onChange={(e) => p.onModel(e.target.value)}
+                    disabled={locked || p.models.length === 0}
+                  >
+                    <option value="" disabled>
+                      {p.models.length ? "Choose a model" : "No models loaded"}
                     </option>
-                  ))}
-                </select>
+                    {p.models.map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.id}
+                      </option>
+                    ))}
+                  </select>
+                </div>
                 {!p.models.length && (
                   <button
                     className="text-button"
@@ -169,21 +215,33 @@ export function Playground(p: PlaygroundProps) {
                   placeholder="What would you like to ask?"
                 />
                 <div className="composer-foot">
-                  <span>Up to 1,024 output tokens</span>
-                  <span>Non-streaming</span>
+                  <span className="chip">≤ 1,024 output tokens</span>
+                  <span className="chip">Non-streaming</span>
+                  <span className="chip">store: false</span>
                 </div>
                 <button
                   className="primary quote-button"
                   onClick={p.onQuote}
-                  disabled={p.busy || locked || !p.model || !p.prompt.trim()}
+                  disabled={
+                    p.busy ||
+                    (locked && !expired) ||
+                    !p.model ||
+                    !p.prompt.trim()
+                  }
                 >
                   {p.phase === "quoting"
                     ? "Getting quote…"
-                    : "Get payment quote"}
-                  <span aria-hidden="true">↗</span>
+                    : expired
+                      ? "Get a new quote"
+                      : "Get payment quote"}
+                  <span aria-hidden="true">
+                    {p.phase === "quoting" ? <span className="spinner" /> : "↗"}
+                  </span>
                 </button>
                 <p className="caption">
-                  Quoting is free. Review the ceiling before approving.
+                  {expired
+                    ? "That quote expired without payment. Request a fresh one."
+                    : "Quoting is free. Review the ceiling before approving."}
                 </p>
               </div>
             </section>
@@ -196,29 +254,52 @@ export function Playground(p: PlaygroundProps) {
                 <h2 id="result-heading">
                   <span className="index">03</span>Response
                 </h2>
-                {p.result && (
-                  <button className="text-button" onClick={p.onDownload}>
-                    Save answer ↓
-                  </button>
-                )}
-                <span className="micro">
-                  {p.result
-                    ? p.demo
-                      ? "SIMULATED"
-                      : "RECEIVED"
-                    : "LIVE DELIVERY"}
-                </span>
+                <div className="heading-actions">
+                  {p.result && (
+                    <>
+                      <button
+                        className="text-button"
+                        onClick={() => p.result && copy(p.result.text)}
+                      >
+                        {copied ? "Copied ✓" : "Copy"}
+                      </button>
+                      <button className="text-button" onClick={p.onDownload}>
+                        Save answer ↓
+                      </button>
+                    </>
+                  )}
+                  <span className="micro">
+                    {p.result
+                      ? p.demo
+                        ? "SIMULATED"
+                        : "RECEIVED"
+                      : "LIVE DELIVERY"}
+                  </span>
+                </div>
               </div>
               {p.result ? (
                 <div className="answer">
-                  <p>{p.result.text}</p>
+                  <p className="answer-text">{p.result.text}</p>
                   <div className="answer-meta">
-                    <span>
+                    <span className="charge">
                       Charged{" "}
                       <strong>
                         {displayAmount(p.result.spent)} {network.asset}
                       </strong>
+                      {p.quote && (
+                        <span className="muted">
+                          {" "}
+                          of {displayAmount(p.quote.amount)} held · rest
+                          released
+                        </span>
+                      )}
                     </span>
+                    {p.result.usage && (
+                      <span className="muted">
+                        {p.result.usage.input.toLocaleString()} in ·{" "}
+                        {p.result.usage.output.toLocaleString()} out tokens
+                      </span>
+                    )}
                     {!p.demo && (
                       <a
                         href={`${network.explorer}/tx/${p.result.transaction}`}
@@ -230,24 +311,38 @@ export function Playground(p: PlaygroundProps) {
                     )}
                   </div>
                 </div>
+              ) : p.phase === "running" ? (
+                <div className="running-result">
+                  <div className="progress" aria-hidden="true" />
+                  <div className="skeleton" aria-hidden="true">
+                    <span />
+                    <span />
+                    <span />
+                  </div>
+                  <h3>Inference is running</h3>
+                  <p>
+                    The router is processing your request and finalizing
+                    payment. Keep this tab open.
+                  </p>
+                </div>
               ) : (
-                <div className="empty-result">
+                <div
+                  className={
+                    "empty-result" + (p.phase === "uncertain" ? " warn" : "")
+                  }
+                >
                   <span className="empty-symbol" aria-hidden="true">
-                    [ ↗ ]
+                    {p.phase === "uncertain" ? "[ ? ]" : "[ ↗ ]"}
                   </span>
                   <h3>
-                    {p.phase === "running"
-                      ? "Inference is running"
-                      : p.phase === "uncertain"
-                        ? "Check your purchase status"
-                        : "Your answer arrives here"}
+                    {p.phase === "uncertain"
+                      ? "Check your purchase status"
+                      : "Your answer arrives here"}
                   </h3>
                   <p>
-                    {p.phase === "running"
-                      ? "The router is processing your request and finalizing payment. Keep this tab open."
-                      : p.phase === "uncertain"
-                        ? "The outcome is unresolved. A status check will not run inference or charge again."
-                        : "Once you approve the quote, the router runs inference and returns the live response."}
+                    {p.phase === "uncertain"
+                      ? "The outcome is unresolved. A status check will not run inference or charge again."
+                      : "Once you approve the quote, the router runs inference and returns the live response."}
                   </p>
                 </div>
               )}
@@ -268,10 +363,10 @@ export function Playground(p: PlaygroundProps) {
                 <div className="wallet-block">
                   <span className="field-label">WALLET</span>
                   {p.wallet ? (
-                    <div className="connected">
+                    <div className="connected" title={p.wallet}>
                       <span className="status-dot" />
-                      {p.wallet.slice(0, 8)}…{p.wallet.slice(-6)}
-                      <span>Connected</span>
+                      <span className="mono">{short(p.wallet)}</span>
+                      <span className="badge ok">Connected</span>
                     </div>
                   ) : (
                     <>
@@ -280,18 +375,20 @@ export function Playground(p: PlaygroundProps) {
                         your payment.
                       </p>
                       {p.walletNames.length > 1 && (
-                        <select
-                          aria-label="Browser wallet"
-                          value={p.selectedWallet}
-                          onChange={(e) => p.onSelectWallet(e.target.value)}
-                          disabled={p.busy}
-                        >
-                          {p.walletNames.map((w) => (
-                            <option key={w.id} value={w.id}>
-                              {w.name}
-                            </option>
-                          ))}
-                        </select>
+                        <div className="select-wrap">
+                          <select
+                            aria-label="Browser wallet"
+                            value={p.selectedWallet}
+                            onChange={(e) => p.onSelectWallet(e.target.value)}
+                            disabled={p.busy}
+                          >
+                            {p.walletNames.map((w) => (
+                              <option key={w.id} value={w.id}>
+                                {w.name}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
                       )}
                       <button
                         className="secondary full"
@@ -306,7 +403,7 @@ export function Playground(p: PlaygroundProps) {
                 </div>
                 <div className="amount-block">
                   <span className="field-label">MAXIMUM HOLD</span>
-                  <div className="amount">
+                  <div className={"amount" + (p.quote ? "" : " pending")}>
                     {p.quote ? displayAmount(p.quote.amount) : "—"}
                     <span>{network.asset}</span>
                   </div>
@@ -324,16 +421,27 @@ export function Playground(p: PlaygroundProps) {
                     </div>
                     <div>
                       <dt>Recipient</dt>
-                      <dd className="address">{p.quote.recipient}</dd>
+                      <dd className="mono" title={p.quote.recipient}>
+                        {short(p.quote.recipient, 8, 6)}
+                      </dd>
                     </div>
-                    <div>
-                      <dt>Quote expires</dt>
-                      <dd>{p.seconds > 0 ? `in ${p.seconds}s` : "Expired"}</dd>
-                    </div>
+                    {approvable && (
+                      <div className="expiry">
+                        <dt>Quote expires</dt>
+                        <dd className={p.seconds <= 10 ? "urgent" : ""}>
+                          {p.seconds > 0 ? `in ${p.seconds}s` : "Expired"}
+                        </dd>
+                        <span
+                          className="meter"
+                          aria-hidden="true"
+                          style={{ transform: `scaleX(${remaining})` }}
+                        />
+                      </div>
+                    )}
                   </dl>
                 )}
                 <button
-                  className="primary full"
+                  className={"primary full" + (p.result ? " complete" : "")}
                   disabled={!quoted || !p.wallet || p.busy || p.seconds <= 0}
                   onClick={p.onPay}
                 >
@@ -344,19 +452,37 @@ export function Playground(p: PlaygroundProps) {
                       : p.result
                         ? "Payment complete ✓"
                         : "Approve & run"}
-                  <span aria-hidden="true">→</span>
+                  {!p.result && (
+                    <span aria-hidden="true">
+                      {p.phase === "signing" || p.phase === "running" ? (
+                        <span className="spinner" />
+                      ) : (
+                        "→"
+                      )}
+                    </span>
+                  )}
                 </button>
-                {quoted && (
+                {quoted && !expired && (
                   <p className="caption">
-                    Approval signs a hold up to the displayed ceiling. This
-                    action can spend funds.
+                    {p.wallet
+                      ? "Approval signs a hold up to the displayed ceiling. This action can spend funds."
+                      : "Connect a wallet above to approve this quote."}
                   </p>
                 )}
                 <ol className="steps">
                   {steps.map((step, i) => (
                     <li
                       key={step.label}
-                      className={step.done ? "complete" : ""}
+                      className={
+                        step.done
+                          ? "complete"
+                          : i === current && p.phase !== "idle"
+                            ? p.phase === "uncertain"
+                              ? "active warn"
+                              : "active"
+                            : ""
+                      }
+                      aria-current={i === current ? "step" : undefined}
                     >
                       <span className="step-number">
                         {step.done ? "✓" : `0${i + 1}`}
@@ -388,7 +514,7 @@ export function Playground(p: PlaygroundProps) {
           <section className="recovery panel">
             <div>
               <h2>Purchase status</h2>
-              <p className="purchase-id">{p.purchase}</p>
+              <p className="purchase-id mono">{p.purchase}</p>
               {p.recovery ? (
                 <dl className="recovery-data">
                   <div>
@@ -397,7 +523,18 @@ export function Playground(p: PlaygroundProps) {
                   </div>
                   <div>
                     <dt>Payment</dt>
-                    <dd>{p.recovery.payment}</dd>
+                    <dd
+                      className={
+                        "badge " +
+                        (TERMINAL_OK.includes(p.recovery.payment)
+                          ? "ok"
+                          : p.recovery.terminal
+                            ? "bad"
+                            : "pending")
+                      }
+                    >
+                      {p.recovery.payment}
+                    </dd>
                   </div>
                   <div>
                     <dt>Delivery</dt>
@@ -444,7 +581,7 @@ export function Playground(p: PlaygroundProps) {
         )}
         <details className="under-hood">
           <summary>
-            How the example works <span>VIEW THE FLOW ＋</span>
+            How the example works <span>VIEW THE FLOW</span>
           </summary>
           <div className="flow-grid">
             <div>
